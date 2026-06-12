@@ -1,0 +1,33 @@
+syntax = "proto3";
+
+package user.v1;
+
+option go_package = "github.com/pradeepneosoft/go-kube/gen/proto/user/v1;userv1";
+
+message User {
+  string id = 1;
+  string email = 2;
+  string name = 3;
+  string created_at = 4;
+}
+
+message CreateUserRequest {
+  string email = 1;
+  string name = 2;
+}
+
+message GetUserRequest {
+  string id = 1;
+}
+
+message ListUsersRequest {}
+
+message ListUsersResponse {
+  repeated User users = 1;
+}
+
+service UserService {
+  rpc CreateUser(CreateUserRequest) returns (User);
+  rpc GetUser(GetUserRequest) returns (User);
+  rpc ListUsers(ListUsersRequest) returns (ListUsersResponse);
+}

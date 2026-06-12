@@ -1,0 +1,184 @@
+# ============================================
+# Docker Compose Configuration for Go-Kube Microservices
+# ============================================
+# This file orchestrates the deployment of:
+#   - PostgreSQL: Persistent relational database
+#   - Zookeeper: Kafka cluster manager
+#   - Kafka: Message broker for event streaming
+#   - User Service: gRPC service on port 50051
+#   - Order Service: gRPC service on port 50052, depends on User Service
+#   - Notification Service: Event consumer, processes Kafka messages
+#
+# Service Dependencies:
+#   postgres ← required by user-service, order-service, notification-service
+#   zookeeper ← required by kafka
+#   kafka ← required by order-service, notification-service
+#   user-service ← required by order-service
+#
+# Usage:
+#   docker-compose up --build         # Build and start all services
+#   docker-compose down               # Stop and remove containers
+#   docker-compose down -v            # Also remove volumes (cleans databases)
+#   docker-compose logs -f            # Follow logs from all services
+
+services:
+  # ============================================
+  # PostgreSQL - Primary Relational Database
+  # ============================================
+  postgres:
+    # Use the official lightweight PostgreSQL image.
+    image: postgres:16-alpine
+    # Give the container a fixed name for easier management.
+    container_name: go-kube-postgres
+    environment:
+      # Default database user for the Postgres container.
+      POSTGRES_USER: postgres
+      # Password for the database user.
+      POSTGRES_PASSWORD: postgres
+    ports:
+      # Map host port 5432 to container port 5432.
+      - "5432:5432"
+    volumes:
+      # Persist database files in a named Docker volume.
+      - postgres_data:/var/lib/postgresql/data
+      # Mount initialization script to create additional databases.
+      - ./init-databases.sql:/docker-entrypoint-initdb.d/init-databases.sql
+    healthcheck:
+      # Check whether PostgreSQL is ready to accept connections.
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ============================================
+  # Zookeeper - Kafka Cluster Coordinator
+  # ============================================
+  zookeeper:
+    # Confluent's Zookeeper image for Kafka coordination
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: go-kube-zookeeper
+    environment:
+      # Port where Zookeeper listens for client connections
+      ZOOKEEPER_CLIENT_PORT: 2181
+      # Timing configuration for Zookeeper heartbeats (milliseconds)
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2181:2181"
+    volumes:
+      # Persist Zookeeper state for cluster recovery
+      - zookeeper_data:/var/lib/zookeeper/data
+
+  # ============================================
+  # Kafka - Message Broker for Events
+  # ============================================
+  kafka:
+    # Confluent's Kafka image with necessary tools
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: go-kube-kafka
+    depends_on:
+      # Kafka requires Zookeeper to manage the cluster
+      - zookeeper
+    environment:
+      # Unique ID for this Kafka broker in the cluster
+      KAFKA_BROKER_ID: 1
+      # Zookeeper connection string for broker registration
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      # Address that Kafka advertises to clients (internal Docker network)
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      # Replication factor for offset tracking (1 = no replication)
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      # Enable automatic topic creation when producers/consumers connect
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    ports:
+      - "9092:9092"
+    volumes:
+      # Persist Kafka topic logs and partitions
+      - kafka_data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 9092"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ============================================
+  # User Service - gRPC Microservice (Port 50051)
+  # ============================================
+  user-service:
+    # Build the service from local Dockerfile
+    build:
+      context: .
+      dockerfile: services/user-service/Dockerfile
+    container_name: go-kube-user-service
+    # Wait for PostgreSQL to be healthy before starting
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # gRPC port where this service listens
+      USER_SERVICE_GRPC_PORT: "50051"
+      # PostgreSQL connection string for user_db
+      USER_SERVICE_DATABASE_URL: "postgres://postgres:postgres@postgres:5432/user_db"
+    ports:
+      # Map host port 50051 to container port 50051 (gRPC)
+      - "50051:50051"
+
+  # ============================================
+  # Order Service - gRPC Microservice (Port 50052)
+  # ============================================
+  order-service:
+    # Build the service from local Dockerfile
+    build:
+      context: .
+      dockerfile: services/order-service/Dockerfile
+    container_name: go-kube-order-service
+    # Wait for all dependencies before starting
+    depends_on:
+      postgres:
+        condition: service_healthy
+      # User Service must be started for order-service to connect
+      user-service:
+        condition: service_started
+      kafka:
+        condition: service_healthy
+    environment:
+      # gRPC port where this service listens
+      ORDER_SERVICE_GRPC_PORT: "50052"
+      # PostgreSQL connection string for order_db
+      ORDER_SERVICE_DATABASE_URL: "postgres://postgres:postgres@postgres:5432/order_db"
+      # User Service gRPC endpoint for service-to-service calls
+      USER_SERVICE_GRPC_ADDR: "user-service:50051"
+    ports:
+      # Map host port 50052 to container port 50052 (gRPC)
+      - "50052:50052"
+
+  # ============================================
+  # Notification Service - Event Consumer
+  # ============================================
+  notification-service:
+    # Build the service from local Dockerfile
+    build:
+      context: .
+      dockerfile: services/notification-service/Dockerfile
+    container_name: go-kube-notification-service
+    # Wait for Kafka to be ready before starting
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      # Kafka broker connection string
+      KAFKA_BROKERS: "kafka:9092"
+      # Consumer group for coordinated message consumption
+      KAFKA_CONSUMER_GROUP: "notification-service"
+      # PostgreSQL connection string for notification_db
+      NOTIFICATION_SERVICE_DATABASE_URL: "postgres://postgres:postgres@postgres:5432/notification_db"
+
+# ============================================
+# Named Volumes - Persistent Data Storage
+# ============================================
+volumes:
+  # PostgreSQL data volume - survives container restarts
+  postgres_data:
+  # Zookeeper state volume - preserves cluster metadata
+  zookeeper_data:
+  # Kafka logs volume - preserves message partitions and topics
+  kafka_data:
