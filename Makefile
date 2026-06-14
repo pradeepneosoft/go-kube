@@ -1,4 +1,4 @@
-.PHONY: tidy build run-user run-order run-notification proto
+.PHONY: tidy build run-user run-order run-notification proto deploy-local
 
 tidy:
 	go mod tidy
@@ -22,3 +22,6 @@ proto:
 		--go_out=gen --go_opt=paths=source_relative \
 		--go-grpc_out=gen --go-grpc_opt=paths=source_relative \
 		proto/user/v1/user.proto proto/order/v1/order.proto
+
+deploy-local:
+	./scripts/deploy-local-kind.sh
